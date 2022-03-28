@@ -1,0 +1,121 @@
+---
+title: "Classifying Exercise Techniques Using Machine Learning"
+author: "Ellen Tworkoski"
+date: "3/27/2022"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Executive Summary
+This report describes the creation and evaluation of three machine learning models developed to determine whether a barbell exercise was being performed incorrectly or correctly via analysis of wearable sensor data. Linear discriminant analysis, decision tree, and random forest models were built on a training dataset and evaluated using 5-fold cross-validation. The random forest model exhibited the best performance by far with 99% accuracy, compared to either the decision tree (50% accuracy) or linear discriminant analysis (73% accuracy) models.  
+
+## Introduction
+Sensor data used for this analysis was borrowed from Velloso et al. (reference at end of report). Six young healthy participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. The goal of the machine learning algorithms described in this report was to accurately classify which exercise class was performed using data from sensors located on the forearm, arm, belt, and dumbbell. A training dataset consisting of 19,622 observations was provided to build the models.  
+
+## Data Cleaning and Exploration
+The raw training data contains 160 variables. Upon inspection, 100 of these variables were mostly comprised of missing values (i.e., ~97% of observations were missing). These 100 variables were dropped from the dataset.  
+```{r load packages, cache = T, message = F, warning = F }
+#Load relevant packages
+library(tidyverse)
+library(caret)
+library(knitr)
+library(parallel)
+library(doParallel)
+```
+
+```{r download and clean data, cache = T}
+#Download training data
+download.file(url = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", destfile = "./training_data.csv", method = "curl")
+training <- read.csv(file = "training_data.csv", na.strings = c("","NA"))
+
+#Clean variables in data and create new dataset, training_nonmissing, which only contains variables that have no missing values.
+varnames <- colnames(training)
+find_missing <- function(var){
+    sum(is.na(training[,var]))/length(training[,var])
+}
+missing_var_summary <- as.data.frame(cbind(varnames, prop_missing = sapply(varnames, find_missing)))
+unique(missing_var_summary$prop_missing)
+nonmissing_vars <- missing_var_summary %>% subset(prop_missing == 0) 
+training_nonmissing <- training[,nonmissing_vars$varnames]
+```  
+
+After cleaning the data, we explored observation frequency across users and classes, and investigated relationships between different possible predictors and classe. Figure 1 below shows the count of observations for each user and exercise classe, with each data row counting as one observation. We see roughly similar observation counts across users with the highest counts observed for exercise classe A, the classe which indicates the exercise was performed correctly.  
+
+Figure 2 (shown below) presents the subset of sensor data measured at the belt location over time, stratified by exercise classe. Similar plots were constructed for the other three sensor locations, but are not included here. We see that different classes are associated with different values of several of the belt sensor measurements, but no single measurement provides a clear differentiation between classes.  
+
+Figure 3 presents the subset of sensor data measured at the belt location over time, stratified by user. This plot shows that user identity strongly influences the sensor measurements obtained, and therefore is an important variable to include when predicting exercise classe.  
+
+```{r explore data, fig.width = 14, fig.height = 8, cache = T}
+#Convert classe, window number, and user_name to factor variables
+training_nonmissing$classe <- as.factor(training_nonmissing$classe)
+training_nonmissing$user_name <- as.factor(training_nonmissing$user_name)
+training_nonmissing$num_window <- as.factor(training_nonmissing$num_window)
+
+#Take a look at number of obs per user and class
+ggplot(data = training_nonmissing, mapping = aes(user_name, fill = classe)) + 
+    geom_bar(position = "dodge") +
+    labs(x = "User Name", y = "Number of Observations", title ="Fig 1. Number of Observations Per User and Exercise Class")
+
+#Take a look at sensor data over time, stratified by class and user
+training_nonmiss_pivot <- training_nonmissing %>%
+                    pivot_longer(cols = -c(1:7,60),
+                    names_to = "variable",
+                    values_to = "value")
+var_subset_1 <- grepl("belt", training_nonmiss_pivot$variable)
+training_belt <- training_nonmiss_pivot[var_subset_1,]
+ggplot(data = training_belt, mapping = aes(raw_timestamp_part_2, value, group = num_window, color = classe)) +
+    geom_point(alpha = 0.1) +
+    geom_line() +
+    facet_wrap(~variable, scales = "free") +
+    labs(x = 'Time', y = 'Belt Sensor Value', title = 'Fig 2. Belt Sensor Measurements Over Time, Stratified by Class')
+ggplot(data = training_belt, mapping = aes(raw_timestamp_part_2, value, group = num_window, color = user_name)) +
+    geom_point(alpha = 0.1) +
+    geom_line() +
+    facet_wrap(~variable, scales = "free") +
+    labs(x = 'Time', y = 'Belt Sensor Value', title = 'Fig 3. Belt Sensor Measurements Over Time, Stratified by User')
+```    
+
+## Construction of Machine Learning Algorithms
+Three machine learning models of varying complexity were implemented: linear discriminant analysis, decision tree, and random forest. The random forest model was hypothesized to have the best performance given that the problem required categorical classification using complex, interrelated predictor variables. The other models were run for comparison purposes. Given that the exploratory analysis did not reveal any variable(s) as having particularly strong predictive power, all available variables not related to experiment timestamp were included as predictors. In all three models, 53 variables consisting of user name, and sensor data from the belt, forearm, arm, and dumbbell locations (13 variables from each location) were used as predictors. Five-fold cross-validation was used to validate the model and provide an approximate out of sample error estimate. A higher number of folds was not considered given the relatively small size of the training dataset (19,622 observations).  
+```{r machine learning models, cache = T}
+#To speed up run, enable parallel processing
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+#Remove timestamp variables from training dataset. Set-up 5-fold cross-validation, and use of accuracy metric
+training_model <- training_nonmissing[,-c(1,3:7)]
+control_param <- trainControl(method = "cv", number = 5, allowParallel = T)
+metric_param <- "Accuracy"
+
+#Run LDA, decision tree, and random forest models
+set.seed(1156)
+lda_model <- train(classe ~., data=training_model, method = 'lda', trControl = control_param, metric = metric_param)
+
+set.seed(1156)
+tree_model <- train(classe~., data=training_model, method = 'rpart', trControl = control_param, metric = metric_param)
+
+set.seed(1156)
+rf_model <- train(classe~., data=training_model, method = 'rf', trControl = control_param, metric = metric_param)
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+```{r summarize results}
+#Summarize accuracy obtained with each model
+all_results <- resamples(list(lda = lda_model, tree = tree_model, rf = rf_model))
+summary(all_results)
+```
+
+## Conclusions and Limitations
+Based on the cross-validated results summarized above, we expect the random forest model to have an out of sample accuracy of ~99%, while the linear discriminant analysis model and decision tree model showed a much lower accuracy of 73% and 50% respectively. Therefore, we select the random forest model as the best predictive model for our data.  
+
+There are a few limitations to our approach. First, we did not account for patterns in sensor data across time. Doing so may improve the accuracy of the model, but would also result in a model of increased complexity. Second, we did not implement a method for compressing the number of predictors (e.g., principal components analysis). Doing so may have reduced model variability. A preliminary PCA was performed (not shown), but indicated that 25 components would need to be included in order to explain at least 95% of the data variance. Based on this, a decision was made to directly include all predictor variables in the model training process in order to improve model interpretability.  
+
+
+## Reference
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
