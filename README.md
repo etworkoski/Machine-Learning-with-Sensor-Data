@@ -1,3 +1,6 @@
+## Link for HTML report
+A viewable HTML report for this project can be accessesed at: https://etworkoski.github.io/Machine-Learning-with-Sensor-Data/
+
 ## Welcome to GitHub Pages
 
 You can use the [editor on GitHub](https://github.com/etworkoski/Machine-Learning-with-Sensor-Data/edit/main/README.md) to maintain and preview the content for your website in Markdown files.
